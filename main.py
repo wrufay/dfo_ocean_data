@@ -5,11 +5,6 @@ from fastapi import FastAPI
 
 app = FastAPI()
 
-@app.get("/api/noise")
-
-def root():
-    return {"message": "app is running"}
-
 @app.get("/")
 def root():
     return {"message": "app is running"}
