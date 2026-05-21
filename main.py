@@ -9,7 +9,7 @@ def root():
 
 @app.get("/")
 def root():
-    return {"message": "Noise app is running"}
+    return {"message": "app is running"}
 
 @app.get("/api/noise")
 def get_noise():
@@ -19,4 +19,4 @@ def get_noise():
         "decibels": 120
     }
 
-# command to uvicorn main:app --reload
+# command to run: uvicorn main:app --reload
