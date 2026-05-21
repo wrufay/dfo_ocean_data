@@ -4,8 +4,11 @@
 
 ### Stack:
 Python3
-React.js
-FastAPI
+Frontend: React.js
+Backend: FastAPI
+
+Libraries
+- OpenLayers to display map
 
 
 ### Notes

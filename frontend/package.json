@@ -6,6 +6,7 @@
         "build": "webpack --mode production"
     },
     "dependencies": {
+        "ol": "^10.9.0",
         "react": "^19.2.6",
         "react-dom": "^19.2.6"
     },
@@ -14,9 +15,11 @@
         "@babel/preset-env": "^7.29.5",
         "@babel/preset-react": "^7.28.5",
         "babel-loader": "^10.1.1",
+        "css-loader": "^7.1.4",
         "html-webpack-plugin": "^5.6.7",
+        "style-loader": "^4.0.0",
         "webpack": "^5.107.1",
-        "webpack-cli": "^7.0.2",
+        "webpack-cli": "^5.1.4",
         "webpack-dev-server": "^5.2.4"
     }
 }

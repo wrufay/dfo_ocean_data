@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 # Command to run the backend server locally: uvicorn main:app --reload
 
-# Initialize FastAPI, register routes and configure middleware*
+# This file is used to initialize FastAPI, register routes and configure middleware*
 
 app = FastAPI()
 
@@ -17,6 +17,7 @@ def root():
 @app.get("/api/noise")
 def get_noise():
     return {
+        # Fake sample data
         "source": "wind_turbine_1",
         "location": {"lat": 44.5, "lon": -63.5},
         "decibels": 120
