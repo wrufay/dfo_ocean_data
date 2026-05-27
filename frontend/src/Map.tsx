@@ -3,37 +3,69 @@ import Map from 'ol/Map';
 import View from 'ol/View';
 import TileLayer from 'ol/layer/Tile';
 import OSM from 'ol/source/OSM';
-import { fromLonLat } from 'ol/proj';
-import { transformExtent } from 'ol/proj';
+import { fromLonLat, transformExtent } from 'ol/proj';
 import Feature from 'ol/Feature';
 import LineString from 'ol/geom/LineString';
 import Point from 'ol/geom/Point';
 import VectorLayer from 'ol/layer/Vector';
 import VectorSource from 'ol/source/Vector';
 import { Style, Stroke, Circle as CircleStyle, Fill } from 'ol/style';
-import Draw from 'ol/interaction/Draw';
-import { createBox } from 'ol/interaction/Draw';
+import Draw, { createBox } from 'ol/interaction/Draw';
 import 'ol/ol.css';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+interface Vessel {
+  mmsi: number;
+  vessel_name: string | null;
+  ship_type: string | number | null;
+  source: string;
+}
+
+interface RoutePoint {
+  time: number | string;
+  latitude: number;
+  longitude: number;
+  sog: number | null;
+  cog: number | null;
+  source: string;
+}
+
+function featureStyle(feature: Feature): Style {
+  const type = feature.getGeometry()?.getType();
+  if (type === 'LineString') {
+    return new Style({
+      stroke: new Stroke({ color: '#127475', width: 2 }),
+    });
+  }
+  const sog = (feature.get('sog') as number) || 0;
+  const color = sog > 10 ? '#e63946' : sog > 3 ? '#f4a261' : '#2a9d8f';
+  return new Style({
+    image: new CircleStyle({
+      radius: 4,
+      fill: new Fill({ color }),
+      stroke: new Stroke({ color: '#fff', width: 1 }),
+    }),
+  });
+}
+
 function ShipMap() {
-  const mapRef      = useRef(null);
-  const mapObj      = useRef(null);
-  const sourceRef   = useRef(new VectorSource());
-  const drawRef     = useRef(null);
+  const mapRef    = useRef<HTMLDivElement>(null);
+  const mapObj    = useRef<Map | null>(null);
+  const sourceRef = useRef(new VectorSource());
+  const drawRef   = useRef<Draw | null>(null);
 
-  const [vessels, setVessels]         = useState([]);
-  const [search, setSearch]           = useState('');
-  const [selected, setSelected]       = useState(null);
-  const [start, setStart]             = useState('2025-03-11');
-  const [end, setEnd]                 = useState('2025-03-13');
-  const [loading, setLoading]         = useState(false);
-  const [pointCount, setPointCount]   = useState(null);
-  const [drawMode, setDrawMode]       = useState(false);
+  const [vessels, setVessels]       = useState<Vessel[]>([]);
+  const [search, setSearch]         = useState('');
+  const [selected, setSelected]     = useState<Vessel | null>(null);
+  const [start, setStart]           = useState('2025-03-11');
+  const [end, setEnd]               = useState('2025-03-13');
+  const [loading, setLoading]       = useState(false);
+  const [pointCount, setPointCount] = useState<number | null>(null);
+  const [drawMode, setDrawMode]     = useState(false);
 
-  // initialise map once
   useEffect(() => {
+    if (!mapRef.current) return;
     const map = new Map({
       target: mapRef.current,
       layers: [
@@ -49,10 +81,9 @@ function ShipMap() {
       }),
     });
     mapObj.current = map;
-    return () => map.setTarget(null);
+    return () => map.setTarget(undefined);
   }, []);
 
-  // fetch vessel list on mount
   useEffect(() => {
     fetch(`${API}/api/vessels`)
       .then(r => r.json())
@@ -60,7 +91,6 @@ function ShipMap() {
       .catch(console.error);
   }, []);
 
-  // toggle draw box interaction
   useEffect(() => {
     const map = mapObj.current;
     if (!map) return;
@@ -78,11 +108,16 @@ function ShipMap() {
       });
 
       draw.on('drawend', e => {
-        const extent = e.feature.getGeometry().getExtent();
+        const extent = e.feature.getGeometry()!.getExtent();
         const [min_lon, min_lat, max_lon, max_lat] = transformExtent(extent, 'EPSG:3857', 'EPSG:4326');
         setDrawMode(false);
 
-        const params = new URLSearchParams({ min_lat, max_lat, min_lon, max_lon });
+        const params = new URLSearchParams({
+          min_lat: String(min_lat),
+          max_lat: String(max_lat),
+          min_lon: String(min_lon),
+          max_lon: String(max_lon),
+        });
         fetch(`${API}/api/vessels/area?${params}`)
           .then(r => r.json())
           .then(d => setVessels(d.vessels || []))
@@ -93,24 +128,6 @@ function ShipMap() {
       drawRef.current = draw;
     }
   }, [drawMode]);
-
-  function featureStyle(feature) {
-    const type = feature.getGeometry().getType();
-    if (type === 'LineString') {
-      return new Style({
-        stroke: new Stroke({ color: '#127475', width: 2 }),
-      });
-    }
-    const sog = feature.get('sog') || 0;
-    const color = sog > 10 ? '#e63946' : sog > 3 ? '#f4a261' : '#2a9d8f';
-    return new Style({
-      image: new CircleStyle({
-        radius: 4,
-        fill: new Fill({ color }),
-        stroke: new Stroke({ color: '#fff', width: 1 }),
-      }),
-    });
-  }
 
   function loadRoute() {
     if (!selected) return;
@@ -125,17 +142,13 @@ function ShipMap() {
 
     fetch(`${API}/api/vessel/${selected.mmsi}/route?${params}`)
       .then(r => r.json())
-      .then(data => {
+      .then((data: { points: RoutePoint[] }) => {
         const pts = data.points || [];
         setPointCount(pts.length);
-
         if (pts.length === 0) return;
 
         const coords = pts.map(p => fromLonLat([p.longitude, p.latitude]));
-
-        sourceRef.current.addFeature(
-          new Feature({ geometry: new LineString(coords) })
-        );
+        sourceRef.current.addFeature(new Feature({ geometry: new LineString(coords) }));
 
         pts.forEach(p => {
           const f = new Feature({
@@ -148,7 +161,7 @@ function ShipMap() {
         });
 
         const extent = sourceRef.current.getExtent();
-        mapObj.current.getView().fit(extent, { padding: [60, 60, 60, 60], maxZoom: 12 });
+        mapObj.current!.getView().fit(extent, { padding: [60, 60, 60, 60], maxZoom: 12 });
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -176,9 +189,7 @@ function ShipMap() {
   return (
     <div className="relative w-full h-screen">
 
-      {/* Sidebar */}
       <div className="absolute top-0 left-0 h-full w-72 bg-white shadow-lg z-10 flex flex-col overflow-hidden">
-
         <div className="p-4 border-b">
           <div className="flex items-baseline justify-between mb-3">
             <h2 className="font-semibold text-[#127475] text-lg">Vessel Tracker</h2>
@@ -239,7 +250,6 @@ function ShipMap() {
           )}
         </div>
 
-        {/* Vessel list */}
         <div className="flex-1 overflow-y-auto">
           {filtered.length === 0 && (
             <p className="text-xs text-gray-400 p-4 text-center">
@@ -261,10 +271,8 @@ function ShipMap() {
         </div>
       </div>
 
-      {/* Map */}
       <div ref={mapRef} className={`w-full h-full pl-72 ${drawMode ? 'cursor-crosshair' : ''}`} />
 
-      {/* Speed legend */}
       <div className="absolute bottom-4 right-4 bg-white rounded shadow px-3 py-2 text-xs z-10">
         <div className="font-medium mb-1 text-gray-600">Speed (knots)</div>
         <div className="flex items-center gap-1.5 mb-0.5"><span className="w-3 h-3 rounded-full bg-[#2a9d8f] inline-block"/>&lt; 3</div>
@@ -277,7 +285,6 @@ function ShipMap() {
           Draw a box on the map to filter vessels
         </div>
       )}
-
     </div>
   );
 }
