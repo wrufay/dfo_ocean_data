@@ -4,12 +4,15 @@ import View from 'ol/View';
 import TileLayer from 'ol/layer/Tile';
 import OSM from 'ol/source/OSM';
 import { fromLonLat } from 'ol/proj';
+import { transformExtent } from 'ol/proj';
 import Feature from 'ol/Feature';
 import LineString from 'ol/geom/LineString';
 import Point from 'ol/geom/Point';
 import VectorLayer from 'ol/layer/Vector';
 import VectorSource from 'ol/source/Vector';
 import { Style, Stroke, Circle as CircleStyle, Fill } from 'ol/style';
+import Draw from 'ol/interaction/Draw';
+import { createBox } from 'ol/interaction/Draw';
 import 'ol/ol.css';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -18,6 +21,7 @@ function ShipMap() {
   const mapRef      = useRef(null);
   const mapObj      = useRef(null);
   const sourceRef   = useRef(new VectorSource());
+  const drawRef     = useRef(null);
 
   const [vessels, setVessels]         = useState([]);
   const [search, setSearch]           = useState('');
@@ -26,6 +30,7 @@ function ShipMap() {
   const [end, setEnd]                 = useState('2025-03-13');
   const [loading, setLoading]         = useState(false);
   const [pointCount, setPointCount]   = useState(null);
+  const [drawMode, setDrawMode]       = useState(false);
 
   // initialise map once
   useEffect(() => {
@@ -55,6 +60,40 @@ function ShipMap() {
       .catch(console.error);
   }, []);
 
+  // toggle draw box interaction
+  useEffect(() => {
+    const map = mapObj.current;
+    if (!map) return;
+
+    if (drawRef.current) {
+      map.removeInteraction(drawRef.current);
+      drawRef.current = null;
+    }
+
+    if (drawMode) {
+      const draw = new Draw({
+        source: new VectorSource(),
+        type: 'Circle',
+        geometryFunction: createBox(),
+      });
+
+      draw.on('drawend', e => {
+        const extent = e.feature.getGeometry().getExtent();
+        const [min_lon, min_lat, max_lon, max_lat] = transformExtent(extent, 'EPSG:3857', 'EPSG:4326');
+        setDrawMode(false);
+
+        const params = new URLSearchParams({ min_lat, max_lat, min_lon, max_lon });
+        fetch(`${API}/api/vessels/area?${params}`)
+          .then(r => r.json())
+          .then(d => setVessels(d.vessels || []))
+          .catch(console.error);
+      });
+
+      map.addInteraction(draw);
+      drawRef.current = draw;
+    }
+  }, [drawMode]);
+
   function featureStyle(feature) {
     const type = feature.getGeometry().getType();
     if (type === 'LineString') {
@@ -62,7 +101,6 @@ function ShipMap() {
         stroke: new Stroke({ color: '#127475', width: 2 }),
       });
     }
-    // Point — color by speed
     const sog = feature.get('sog') || 0;
     const color = sog > 10 ? '#e63946' : sog > 3 ? '#f4a261' : '#2a9d8f';
     return new Style({
@@ -95,12 +133,10 @@ function ShipMap() {
 
         const coords = pts.map(p => fromLonLat([p.longitude, p.latitude]));
 
-        // route line
         sourceRef.current.addFeature(
           new Feature({ geometry: new LineString(coords) })
         );
 
-        // individual ping points
         pts.forEach(p => {
           const f = new Feature({
             geometry: new Point(fromLonLat([p.longitude, p.latitude])),
@@ -111,7 +147,6 @@ function ShipMap() {
           sourceRef.current.addFeature(f);
         });
 
-        // zoom to route
         const extent = sourceRef.current.getExtent();
         mapObj.current.getView().fit(extent, { padding: [60, 60, 60, 60], maxZoom: 12 });
       })
@@ -119,12 +154,22 @@ function ShipMap() {
       .finally(() => setLoading(false));
   }
 
+  function resetVessels() {
+    sourceRef.current.clear();
+    setSelected(null);
+    setPointCount(null);
+    fetch(`${API}/api/vessels`)
+      .then(r => r.json())
+      .then(d => setVessels(d.vessels || []))
+      .catch(console.error);
+  }
+
   const filtered = vessels.filter(v => {
     const q = search.toLowerCase();
     return (
       String(v.mmsi).includes(q) ||
       (v.vessel_name || '').toLowerCase().includes(q) ||
-      String(v.ship_type  || '').toLowerCase().includes(q)
+      String(v.ship_type || '').toLowerCase().includes(q)
     );
   });
 
@@ -135,7 +180,14 @@ function ShipMap() {
       <div className="absolute top-0 left-0 h-full w-72 bg-white shadow-lg z-10 flex flex-col overflow-hidden">
 
         <div className="p-4 border-b">
-          <h2 className="font-semibold text-[#127475] text-lg mb-3">Vessel Tracker</h2>
+          <div className="flex items-baseline justify-between mb-3">
+            <h2 className="font-semibold text-[#127475] text-lg">Vessel Tracker</h2>
+            <span className="text-xs text-gray-400">
+              {filtered.length !== vessels.length
+                ? `${filtered.length} / ${vessels.length}`
+                : `${vessels.length} vessels`}
+            </span>
+          </div>
 
           <input
             className="w-full border rounded px-2 py-1 text-sm mb-3"
@@ -143,6 +195,21 @@ function ShipMap() {
             value={search}
             onChange={e => setSearch(e.target.value)}
           />
+
+          <div className="flex gap-2 mb-3">
+            <button
+              onClick={() => setDrawMode(m => !m)}
+              className={`flex-1 rounded py-1.5 text-sm border ${drawMode ? 'bg-[#127475] text-white' : 'text-[#127475] border-[#127475]'}`}
+            >
+              {drawMode ? 'Drawing...' : 'Filter by Area'}
+            </button>
+            <button
+              onClick={resetVessels}
+              className="flex-1 rounded py-1.5 text-sm border text-gray-500 border-gray-300"
+            >
+              Reset
+            </button>
+          </div>
 
           <div className="flex flex-col gap-2 text-sm">
             <label className="flex flex-col gap-0.5">
@@ -195,7 +262,7 @@ function ShipMap() {
       </div>
 
       {/* Map */}
-      <div ref={mapRef} className="w-full h-full pl-72" />
+      <div ref={mapRef} className={`w-full h-full pl-72 ${drawMode ? 'cursor-crosshair' : ''}`} />
 
       {/* Speed legend */}
       <div className="absolute bottom-4 right-4 bg-white rounded shadow px-3 py-2 text-xs z-10">
@@ -204,6 +271,12 @@ function ShipMap() {
         <div className="flex items-center gap-1.5 mb-0.5"><span className="w-3 h-3 rounded-full bg-[#f4a261] inline-block"/>3 – 10</div>
         <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#e63946] inline-block"/>&gt; 10</div>
       </div>
+
+      {drawMode && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-[#127475] text-white text-sm px-4 py-2 rounded shadow z-20">
+          Draw a box on the map to filter vessels
+        </div>
+      )}
 
     </div>
   );

@@ -70,6 +70,53 @@ def get_vessels():
     return {"vessels": vessels, "count": len(vessels)}
 
 
+@app.get("/api/vessels/area")
+def get_vessels_in_area(
+    min_lat: float = Query(...),
+    max_lat: float = Query(...),
+    min_lon: float = Query(...),
+    max_lon: float = Query(...),
+):
+    with get_db() as conn:
+        ccg = []
+        sat = []
+        try:
+            mmsis = conn.execute("""
+                SELECT DISTINCT mmsi FROM ais_202503_dynamic
+                WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
+            """, [min_lat, max_lat, min_lon, max_lon]).fetchall()
+            mmsi_list = [r["mmsi"] for r in mmsis]
+            if mmsi_list:
+                placeholders = ','.join('?' * len(mmsi_list))
+                ccg = conn.execute(f"""
+                    SELECT mmsi, vessel_name, ship_type, 'CCG' AS source
+                    FROM ais_202503_static WHERE mmsi IN ({placeholders})
+                """, mmsi_list).fetchall()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            sat = conn.execute("""
+                SELECT DISTINCT mmsi, vessel_name, ship_type, 'satellite' AS source
+                FROM ais_satellite
+                WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
+            """, [min_lat, max_lat, min_lon, max_lon]).fetchall()
+        except sqlite3.OperationalError:
+            pass
+
+    seen = set()
+    vessels = []
+    for row in list(ccg) + list(sat):
+        if row["mmsi"] not in seen:
+            seen.add(row["mmsi"])
+            vessels.append({
+                "mmsi": row["mmsi"],
+                "vessel_name": row["vessel_name"],
+                "ship_type": row["ship_type"],
+                "source": row["source"],
+            })
+    return {"vessels": vessels, "count": len(vessels)}
+
+
 @app.get("/api/vessel/{mmsi}/route")
 def get_vessel_route(
     mmsi: int,
