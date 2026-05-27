@@ -124,7 +124,7 @@ function ShipMap() {
     return (
       String(v.mmsi).includes(q) ||
       (v.vessel_name || '').toLowerCase().includes(q) ||
-      (v.ship_type  || '').toLowerCase().includes(q)
+      String(v.ship_type  || '').toLowerCase().includes(q)
     );
   });
 
