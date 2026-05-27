@@ -1,4 +1,3 @@
 fastapi
 uvicorn
-xarray
-netCDF4
+httpx

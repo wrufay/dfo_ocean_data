@@ -1,60 +1,73 @@
+import os
+import re
 import sqlite3
 from pathlib import Path
+
+import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # uvicorn main:app --reload
+# Set NEON_CONNECTION_STRING env var to use Neon Postgres, otherwise falls back to SQLite.
 
 DB_PATH = Path(__file__).parent / "data" / "ais.db"
+NEON_CONN = os.environ.get("NEON_CONNECTION_STRING")
+NEON_URL = f"https://{re.search(r'@([^/?]+)', NEON_CONN).group(1)}/sql" if NEON_CONN else None
 
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-def get_db():
+def nq(sql: str, params: list = None) -> list[dict]:
+    """Execute SQL via Neon HTTP API."""
+    body = {"query": sql}
+    if params:
+        body["params"] = params
+    r = httpx.post(NEON_URL, json=body, headers={"Neon-Connection-String": NEON_CONN}, timeout=30)
+    r.raise_for_status()
+    return r.json()["rows"]
+
+
+def sq(sql: str, params: list = None) -> list[dict]:
+    """Execute SQL via SQLite."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    return conn
+    rows = conn.execute(sql, params or []).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def query(pg_sql, lite_sql, pg_params=None, lite_params=None) -> list[dict]:
+    return nq(pg_sql, pg_params) if NEON_CONN else sq(lite_sql, lite_params)
 
 
 @app.get("/")
 def root():
-    return {"message": "app is running"}
+    return {"message": "app is running", "db": "neon" if NEON_CONN else "sqlite"}
 
 
 @app.get("/api/vessels")
 def get_vessels():
-    """List all unique vessels across CCG and satellite data."""
-    with get_db() as conn:
-        # CCG dynamic + static joined on mmsi
-        ccg = conn.execute("""
-            SELECT
-                s.mmsi,
-                s.vessel_name,
-                s.ship_type,
-                'CCG' AS source
-            FROM ais_202503_static s
-            WHERE s.mmsi IS NOT NULL
-            GROUP BY s.mmsi
-        """).fetchall()
-
-        # Satellite
-        sat = conn.execute("""
-            SELECT DISTINCT
-                mmsi,
-                vessel_name,
-                ship_type,
-                'satellite' AS source
-            FROM ais_satellite
-            WHERE mmsi IS NOT NULL
-        """).fetchall()
-
+    ccg = query(
+        pg_sql="""
+            SELECT DISTINCT ON (mmsi) mmsi, vessel_name, ship_type, 'CCG' AS source
+            FROM ais_202503_static WHERE mmsi IS NOT NULL ORDER BY mmsi
+        """,
+        lite_sql="""
+            SELECT mmsi, vessel_name, ship_type, 'CCG' AS source
+            FROM ais_202503_static WHERE mmsi IS NOT NULL GROUP BY mmsi
+        """,
+    )
+    sat = query(
+        pg_sql="""
+            SELECT DISTINCT ON (mmsi) mmsi, vessel_name, ship_type, 'satellite' AS source
+            FROM ais_satellite WHERE mmsi IS NOT NULL ORDER BY mmsi
+        """,
+        lite_sql="""
+            SELECT DISTINCT mmsi, vessel_name, ship_type, 'satellite' AS source
+            FROM ais_satellite WHERE mmsi IS NOT NULL
+        """,
+    )
     seen = set()
     vessels = []
     for row in list(ccg) + list(sat):
@@ -66,7 +79,6 @@ def get_vessels():
                 "ship_type":   row["ship_type"],
                 "source":      row["source"],
             })
-
     return {"vessels": vessels, "count": len(vessels)}
 
 
@@ -77,42 +89,46 @@ def get_vessels_in_area(
     min_lon: float = Query(...),
     max_lon: float = Query(...),
 ):
-    with get_db() as conn:
-        ccg = []
-        sat = []
-        try:
-            mmsis = conn.execute("""
-                SELECT DISTINCT mmsi FROM ais_202503_dynamic
-                WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-            """, [min_lat, max_lat, min_lon, max_lon]).fetchall()
-            mmsi_list = [r["mmsi"] for r in mmsis]
-            if mmsi_list:
-                placeholders = ','.join('?' * len(mmsi_list))
-                ccg = conn.execute(f"""
-                    SELECT mmsi, vessel_name, ship_type, 'CCG' AS source
-                    FROM ais_202503_static WHERE mmsi IN ({placeholders})
-                """, mmsi_list).fetchall()
-        except sqlite3.OperationalError:
-            pass
-        try:
-            sat = conn.execute("""
-                SELECT DISTINCT mmsi, vessel_name, ship_type, 'satellite' AS source
-                FROM ais_satellite
-                WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-            """, [min_lat, max_lat, min_lon, max_lon]).fetchall()
-        except sqlite3.OperationalError:
-            pass
-
+    ccg = query(
+        pg_sql="""
+            SELECT DISTINCT s.mmsi, s.vessel_name, s.ship_type, 'CCG' AS source
+            FROM ais_202503_static s
+            JOIN ais_202503_dynamic d ON s.mmsi = d.mmsi
+            WHERE d.latitude BETWEEN $1 AND $2 AND d.longitude BETWEEN $3 AND $4
+        """,
+        lite_sql="""
+            SELECT DISTINCT s.mmsi, s.vessel_name, s.ship_type, 'CCG' AS source
+            FROM ais_202503_static s
+            JOIN ais_202503_dynamic d ON s.mmsi = d.mmsi
+            WHERE d.latitude BETWEEN ? AND ? AND d.longitude BETWEEN ? AND ?
+        """,
+        pg_params=[min_lat, max_lat, min_lon, max_lon],
+        lite_params=[min_lat, max_lat, min_lon, max_lon],
+    )
+    sat = query(
+        pg_sql="""
+            SELECT DISTINCT mmsi, vessel_name, ship_type, 'satellite' AS source
+            FROM ais_satellite
+            WHERE latitude BETWEEN $1 AND $2 AND longitude BETWEEN $3 AND $4
+        """,
+        lite_sql="""
+            SELECT DISTINCT mmsi, vessel_name, ship_type, 'satellite' AS source
+            FROM ais_satellite
+            WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
+        """,
+        pg_params=[min_lat, max_lat, min_lon, max_lon],
+        lite_params=[min_lat, max_lat, min_lon, max_lon],
+    )
     seen = set()
     vessels = []
     for row in list(ccg) + list(sat):
         if row["mmsi"] not in seen:
             seen.add(row["mmsi"])
             vessels.append({
-                "mmsi": row["mmsi"],
+                "mmsi":        row["mmsi"],
                 "vessel_name": row["vessel_name"],
-                "ship_type": row["ship_type"],
-                "source": row["source"],
+                "ship_type":   row["ship_type"],
+                "source":      row["source"],
             })
     return {"vessels": vessels, "count": len(vessels)}
 
@@ -120,70 +136,67 @@ def get_vessels_in_area(
 @app.get("/api/vessel/{mmsi}/route")
 def get_vessel_route(
     mmsi: int,
-    start: str = Query(None, description="Start time e.g. 2025-03-11T00:00:00"),
-    end:   str = Query(None, description="End time e.g. 2025-03-13T23:59:59"),
+    start: str = Query(None),
+    end:   str = Query(None),
 ):
-    """
-    Return ordered lat/lon track for a vessel in a time range.
-    Queries both CCG and satellite tables and merges by time.
-    """
-    if not DB_PATH.exists():
-        raise HTTPException(status_code=503, detail="Database not ready yet.")
-
     points = []
 
-    with get_db() as conn:
-        # CCG data — time stored as unix epoch integer
-        ccg_query = "SELECT time, longitude, latitude, NULL as sog, NULL as cog FROM ais_202503_dynamic WHERE mmsi = ?"
-        params = [mmsi]
-        if start:
-            ccg_query += " AND time >= strftime('%s', ?)"
-            params.append(start)
-        if end:
-            ccg_query += " AND time <= strftime('%s', ?)"
-            params.append(end)
-        ccg_query += " ORDER BY time"
+    # --- CCG (time stored as unix epoch integer) ---
+    pg_sql   = "SELECT time, longitude, latitude, sog, cog FROM ais_202503_dynamic WHERE mmsi = $1"
+    lite_sql = "SELECT time, longitude, latitude, sog, cog FROM ais_202503_dynamic WHERE mmsi = ?"
+    pg_params, lite_params = [mmsi], [mmsi]
 
-        try:
-            rows = conn.execute(ccg_query, params).fetchall()
-            for r in rows:
-                points.append({
-                    "time":      r["time"],
-                    "latitude":  r["latitude"],
-                    "longitude": r["longitude"],
-                    "sog":       r["sog"],
-                    "cog":       r["cog"],
-                    "source":    "CCG",
-                })
-        except sqlite3.OperationalError:
-            pass  # CCG table may not exist yet
+    if start:
+        n = len(pg_params) + 1
+        pg_sql   += f" AND time >= EXTRACT(EPOCH FROM ${n}::timestamp)::bigint"
+        lite_sql += " AND time >= strftime('%s', ?)"
+        pg_params.append(start); lite_params.append(start)
+    if end:
+        n = len(pg_params) + 1
+        pg_sql   += f" AND time <= EXTRACT(EPOCH FROM ${n}::timestamp)::bigint"
+        lite_sql += " AND time <= strftime('%s', ?)"
+        pg_params.append(end); lite_params.append(end)
 
-        # Satellite data — time stored as ISO string e.g. 20251201T035835Z
-        sat_query = "SELECT time, longitude, latitude, sog, cog FROM ais_satellite WHERE mmsi = ?"
-        sat_params = [mmsi]
-        if start:
-            sat_query += " AND time >= ?"
-            sat_params.append(start.replace("-", "").replace(":", "").replace(" ", "T"))
-        if end:
-            sat_query += " AND time <= ?"
-            sat_params.append(end.replace("-", "").replace(":", "").replace(" ", "T"))
-        sat_query += " ORDER BY time"
+    pg_sql += " ORDER BY time"
+    lite_sql += " ORDER BY time"
 
-        try:
-            rows = conn.execute(sat_query, sat_params).fetchall()
-            for r in rows:
-                points.append({
-                    "time":      r["time"],
-                    "latitude":  r["latitude"],
-                    "longitude": r["longitude"],
-                    "sog":       r["sog"],
-                    "cog":       r["cog"],
-                    "source":    "satellite",
-                })
-        except sqlite3.OperationalError:
-            pass  # satellite table may not exist yet
+    try:
+        for r in query(pg_sql, lite_sql, pg_params, lite_params):
+            points.append({"time": r["time"], "latitude": r["latitude"],
+                           "longitude": r["longitude"], "sog": r["sog"],
+                           "cog": r["cog"], "source": "CCG"})
+    except Exception:
+        pass
 
-    # merge and sort by time
+    # --- Satellite (time stored as compact ISO string e.g. 20251201T035835Z) ---
+    sat_start = start.replace("-", "").replace(":", "").replace(" ", "T") if start else None
+    sat_end   = end.replace("-", "").replace(":", "").replace(" ", "T") if end else None
+
+    pg_sat   = "SELECT time, longitude, latitude, sog, cog FROM ais_satellite WHERE mmsi = $1"
+    lite_sat = "SELECT time, longitude, latitude, sog, cog FROM ais_satellite WHERE mmsi = ?"
+    pg_sat_params, lite_sat_params = [mmsi], [mmsi]
+
+    if sat_start:
+        n = len(pg_sat_params) + 1
+        pg_sat   += f" AND time >= ${n}"
+        lite_sat += " AND time >= ?"
+        pg_sat_params.append(sat_start); lite_sat_params.append(sat_start)
+    if sat_end:
+        n = len(pg_sat_params) + 1
+        pg_sat   += f" AND time <= ${n}"
+        lite_sat += " AND time <= ?"
+        pg_sat_params.append(sat_end); lite_sat_params.append(sat_end)
+
+    pg_sat += " ORDER BY time"
+    lite_sat += " ORDER BY time"
+
+    try:
+        for r in query(pg_sat, lite_sat, pg_sat_params, lite_sat_params):
+            points.append({"time": r["time"], "latitude": r["latitude"],
+                           "longitude": r["longitude"], "sog": r["sog"],
+                           "cog": r["cog"], "source": "satellite"})
+    except Exception:
+        pass
+
     points.sort(key=lambda p: str(p["time"]))
-
     return {"mmsi": mmsi, "points": points, "count": len(points)}
