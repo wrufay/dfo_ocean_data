@@ -94,6 +94,107 @@ With `DATABASE_URL` set → uses Postgres.
 
 ---
 
+## Filtering to the Scotian Shelf
+
+This is the core data reduction step. The raw data is global; we only want the Scotian Shelf (lat 42–47°N, lon -66–-57°W). The two data sources require two completely different filtering strategies because of how their respective ingestion tools work.
+
+### Bounding Box
+
+```python
+XMIN, XMAX = -66.0, -57.0  # longitude
+YMIN, YMAX = 42.0, 47.0    # latitude
+```
+
+### Satellite: Filtered at Ingest Time
+
+DuckDB's WHERE clause runs the filter during the CSV read, so rows outside the bounding box are never even loaded into Python memory. This is the cleanest approach: the data enters the database pre-filtered.
+
+```sql
+SELECT
+    TRY_CAST(MMSI AS BIGINT)      AS mmsi,
+    Time                           AS time,
+    TRY_CAST(Longitude AS DOUBLE)  AS longitude,
+    TRY_CAST(Latitude  AS DOUBLE)  AS latitude,
+    TRY_CAST(SOG AS DOUBLE)        AS sog,
+    TRY_CAST(COG AS DOUBLE)        AS cog,
+    Vessel_Name                    AS vessel_name,
+    Ship_Type                      AS ship_type
+FROM read_csv('{extracted}', header=true, ignore_errors=true)
+WHERE
+    TRY_CAST(Latitude  AS DOUBLE) BETWEEN 42.0 AND 47.0
+    AND TRY_CAST(Longitude AS DOUBLE) BETWEEN -66.0 AND -57.0
+    AND TRY_CAST(MMSI AS BIGINT) IS NOT NULL
+```
+
+`TRY_CAST` is used on every numeric column because the real satellite CSVs contain occasional malformed values (blank cells, stray text). `TRY_CAST` returns NULL instead of raising an error, and `ignore_errors=true` handles rows where the whole line is unparseable.
+
+**Result:** 62,673 records inserted from 24 zip files (~160 million global rows).
+
+### CCG: Post-Decode Trim + VACUUM
+
+aisdb has no spatial filtering option during decode — it decodes everything it finds in the NMEA files and writes all of it to the database. The CCG shore stations pick up AIS signals from across Canada, so after decoding we had vessels from Vancouver, Montreal, the St. Lawrence, and everywhere else.
+
+**Step 1 — Remove out-of-bounds dynamic pings:**
+
+```python
+def trim_ccg_to_scotian_shelf():
+    with sqlite3.connect(str(SQLITE_PATH)) as conn:
+        cur = conn.execute(f"""
+            DELETE FROM ais_202503_dynamic
+            WHERE latitude  NOT BETWEEN {YMIN} AND {YMAX}
+               OR longitude NOT BETWEEN {XMIN} AND {XMAX}
+        """)
+        print(f"  Removed {cur.rowcount:,} out-of-bounds dynamic rows.")
+```
+
+Removed: **14,621,654 rows** from `ais_202503_dynamic`.
+
+**Step 2 — Cascade delete orphaned static entries:**
+
+After trimming dynamic pings, the static table still had metadata entries for vessels that no longer had any pings in the shelf. These are useless (no route to show) and inflate the vessel list. Remove them:
+
+```python
+        cur = conn.execute("""
+            DELETE FROM ais_202503_static
+            WHERE mmsi NOT IN (SELECT DISTINCT mmsi FROM ais_202503_dynamic)
+        """)
+        print(f"  Removed {cur.rowcount:,} out-of-bounds static rows.")
+```
+
+Removed: **1,020,499 rows** from `ais_202503_static`.
+
+**Step 3 — VACUUM:**
+
+SQLite's DELETE does not shrink the file — it just marks pages as free. To actually reclaim disk space you must run VACUUM, which rewrites the entire database file compactly.
+
+```bash
+sqlite3 data/ais.db "VACUUM;"
+```
+
+**Before VACUUM:** ~2.3 GB  
+**After VACUUM:** ~213 MB
+
+The 213 MB file is small enough to commit to the repo via Git LFS.
+
+### Why Two Different Approaches?
+
+| | Satellite | CCG |
+|---|---|---|
+| Tool | DuckDB | aisdb |
+| Spatial filter during read? | Yes (WHERE clause) | No (aisdb decodes everything) |
+| Strategy | Filter at ingest | Decode all → DELETE → VACUUM |
+| Reason | DuckDB is just SQL — easy | aisdb's decode API has no bbox parameter |
+
+### Before vs After
+
+| Metric | Before | After |
+|---|---|---|
+| `ais_202503_dynamic` rows | ~16 million | ~1.4 million |
+| `ais_202503_static` rows | ~1 million | ~30,000 |
+| Database file size | 2.3 GB | 213 MB |
+
+---
+
 ## The Backend (`main.py`)
 
 FastAPI with two endpoints:
@@ -103,8 +204,13 @@ Returns all unique vessels from both CCG and satellite data, merged and deduplic
 
 **Performance note:** Originally queried `ais_202503_dynamic` (17M rows) with `SELECT DISTINCT` — this caused a full table scan and timed out. Fixed by querying `ais_202503_static` instead, which is much smaller and already contains one row per vessel.
 
+### `GET /api/vessels/area?min_lat=&max_lat=&min_lon=&max_lon=`
+Returns vessels that have at least one dynamic ping inside the given bounding box. Queries `ais_202503_dynamic` for CCG MMSIs, joins with `ais_202503_static` for names, then queries `ais_satellite` directly (it already has name + position in one table). Results are deduplicated by MMSI.
+
 ### `GET /api/vessel/{mmsi}/route?start=...&end=...`
 Returns ordered position points for a vessel in a time range, from both CCG and satellite tables merged and sorted by time.
+
+**Time format quirk:** CCG stores time as a Unix epoch integer; the query uses `strftime('%s', ?)` to convert the ISO string input. Satellite stores time as a compact ISO string (e.g. `20251201T035835Z`); the query strips dashes, colons, and spaces to match that format. Both result sets are merged in Python and sorted by `str(time)` before returning.
 
 ---
 
@@ -114,6 +220,8 @@ React + OpenLayers map centered on the Scotian Shelf (-63.5, 44.5).
 
 **Sidebar:**
 - Search vessels by name or MMSI
+- **Filter by Area** — click "Filter by Area" then drag a box on the map. Uses OpenLayers' `Draw` interaction with `createBox()`. On `drawend`, the box extent is transformed from EPSG:3857 (web mercator) to EPSG:4326 (lon/lat) and sent to `GET /api/vessels/area`, replacing the full vessel list with only vessels that had pings inside the drawn box.
+- Reset button — restores the full vessel list
 - Date range picker (start/end)
 - "Show Route" button
 
@@ -124,6 +232,7 @@ React + OpenLayers map centered on the Scotian Shelf (-63.5, 44.5).
   - Orange: 3–10 knots (moderate)
   - Red: > 10 knots (fast)
 - Auto-zooms to the route extent on load
+- Crosshair cursor when draw mode is active
 
 ---
 
@@ -141,8 +250,8 @@ Neon is a serverless Postgres provider that connects over port 443 (WebSockets/H
 ### Why SQLite Works Fine
 - The app is read-heavy (ingest once, query many times)
 - Small number of concurrent users
-- SQLite file (`data/ais.db`) can be committed to the repo and deployed to Railway alongside FastAPI
-- 2.3GB DB file, fast enough for the use case
+- SQLite file (`data/ais.db`) committed via Git LFS — 213MB after Scotian Shelf trim and VACUUM
+- Fast enough for the use case; queries on the trimmed dataset return in milliseconds
 
 ### The Tradeoff
 SQLite is tied to the lab machine for data updates — if the machine is wiped, the raw data and the DB are gone. The right long-term solution is Postgres on a cloud provider accessible from the lab network (either get IT to open a port, or install Postgres locally on the lab machine and expose it via a tunnel).
@@ -199,9 +308,9 @@ ais_satellite         — exactEarth filtered to Scotian Shelf
 
 ## Next Steps
 
-- [ ] Set up Neon or resolve firewall issue to move to cloud Postgres
-- [ ] Add more satellite data files as they come in
-- [ ] Add popup on map click showing vessel details (name, MMSI, speed, time)
-- [ ] Add vessel type filtering in the sidebar
-- [ ] Deploy to Railway with SQLite bundled
-- [ ] Integrate real CCG data when full dataset is available (currently only 2 test files)
+- [ ] Ingest full CCG dataset (currently only 2 test files from `/home/shared/aisdecode/`)
+- [ ] Add more satellite zip files as they arrive from exactEarth
+- [ ] Add popup on map click showing vessel details (name, MMSI, speed, time, source)
+- [ ] Add vessel type filtering in the sidebar (e.g. show only cargo, tanker, fishing)
+- [ ] Resolve firewall or get IT to open a port → migrate DB to cloud Postgres for multi-user access
+- [ ] Deploy FastAPI + SQLite to Railway (SQLite bundled; feasible at 213MB)
