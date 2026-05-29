@@ -16,7 +16,7 @@ _neon_host_match = re.search(r'@([^/?]+)', NEON_CONN)
 NEON_URL = f"https://{_neon_host_match.group(1)}/sql" if _neon_host_match else ""
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["https://vesselviz.vercel.app"], allow_methods=["*"], allow_headers=["*"])
 
 
 def nq(sql: str, params: list | None = None) -> list[dict]:
