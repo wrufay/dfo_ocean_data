@@ -87,21 +87,35 @@ def trim_ccg_to_scotian_shelf():
     bounding box, then cascade delete vessels with no remaining pings.
     """
     print("Trimming CCG tables to Scotian Shelf bounding box...")
-    with sqlite3.connect(str(SQLITE_PATH)) as conn:
-        cur = conn.execute(f"""
-            DELETE FROM ais_202503_dynamic
-            WHERE latitude  NOT BETWEEN {YMIN} AND {YMAX}
-               OR longitude NOT BETWEEN {XMIN} AND {XMAX}
-        """)
-        print(f"  Removed {cur.rowcount:,} out-of-bounds dynamic rows.")
-
-        cur = conn.execute("""
-            DELETE FROM ais_202503_static
-            WHERE mmsi NOT IN (SELECT DISTINCT mmsi FROM ais_202503_dynamic)
-        """)
-        print(f"  Removed {cur.rowcount:,} out-of-bounds static rows.")
-        conn.commit()
-
+    if USE_POSTGRES:
+        import psycopg2
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    DELETE FROM ais_202503_dynamic
+                    WHERE latitude  NOT BETWEEN {YMIN} AND {YMAX}
+                       OR longitude NOT BETWEEN {XMIN} AND {XMAX}
+                """)
+                print(f"  Removed {cur.rowcount:,} out-of-bounds dynamic rows.")
+                cur.execute("""
+                    DELETE FROM ais_202503_static
+                    WHERE mmsi NOT IN (SELECT DISTINCT mmsi FROM ais_202503_dynamic)
+                """)
+                print(f"  Removed {cur.rowcount:,} out-of-bounds static rows.")
+    else:
+        with sqlite3.connect(str(SQLITE_PATH)) as conn:
+            cur = conn.execute(f"""
+                DELETE FROM ais_202503_dynamic
+                WHERE latitude  NOT BETWEEN {YMIN} AND {YMAX}
+                   OR longitude NOT BETWEEN {XMIN} AND {XMAX}
+            """)
+            print(f"  Removed {cur.rowcount:,} out-of-bounds dynamic rows.")
+            cur = conn.execute("""
+                DELETE FROM ais_202503_static
+                WHERE mmsi NOT IN (SELECT DISTINCT mmsi FROM ais_202503_dynamic)
+            """)
+            print(f"  Removed {cur.rowcount:,} out-of-bounds static rows.")
+            conn.commit()
     print("Trim complete.")
 
 
@@ -171,7 +185,7 @@ if __name__ == "__main__":
 
     ingest_ccg()
 
-    if DEMO_SAMPLE:
+    if DEMO_SAMPLE and not USE_POSTGRES:
         sample_to_demo()
 
     print("\nSample CCG query (first 3 rows):")

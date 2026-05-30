@@ -1,46 +1,37 @@
 """
 Scotian Shelf AIS Vessel Tracker — FastAPI backend.
 
-Reads from SQLite (data/ais.db) by default. If NEON_CONNECTION_STRING is set,
-queries Neon Postgres over HTTPS instead.
+SQLite (data/ais.db) by default.
+Set DATABASE_URL to use Postgres (e.g. when running via docker-compose).
 
-Run locally:
-    uvicorn main:app --reload
+Run locally:  uvicorn main:app --reload
 """
 
 import os
-import re
 import sqlite3
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 DB_PATH = Path(__file__).parent / "data" / "ais.db"
+DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
 
-NEON_CONN: str = os.environ.get("NEON_CONNECTION_STRING", "")
-_neon_host_match = re.search(r"@([^/?]+)", NEON_CONN)
-NEON_URL = f"https://{_neon_host_match.group(1)}/sql" if _neon_host_match else ""
-
-# Whitelist of vessel MMSIs the API will serve. Populated at startup from the DB
-# so we only expose the (sampled) vessels actually shipped in the demo DB.
+# Populated at startup — only MMSIs in the DB are served.
 ALLOWED_MMSIS: set[int] = set()
 
 
-def nq(sql: str, params: list | None = None) -> list[dict]:
-    """Execute SQL via the Neon HTTP API."""
-    body: dict = {"query": sql}
-    if params:
-        body["params"] = params
-    r = httpx.post(NEON_URL, json=body, headers={"Neon-Connection-String": NEON_CONN}, timeout=60)
-    r.raise_for_status()
-    return r.json()["rows"]
+def to_epoch(dt_str: str) -> int:
+    """Convert ISO datetime string to unix timestamp, treating naive strings as UTC."""
+    dt = datetime.fromisoformat(dt_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
 
 
 def sq(sql: str, params: list | None = None) -> list[dict]:
-    """Execute SQL via SQLite."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(sql, params or []).fetchall()
@@ -48,22 +39,32 @@ def sq(sql: str, params: list | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def query(pg_sql: str, lite_sql: str, pg_params: list | None = None, lite_params: list | None = None) -> list[dict]:
-    """Run the Postgres query if Neon is configured, otherwise the SQLite query."""
-    return nq(pg_sql, pg_params) if NEON_CONN else sq(lite_sql, lite_params)
+def pq(sql: str, params: list | None = None) -> list[dict]:
+    import psycopg2
+    import psycopg2.extras
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params or [])
+            return [dict(r) for r in cur.fetchall()]
+
+
+def query(sql: str, params: list | None = None) -> list[dict]:
+    """Route to Postgres or SQLite. Write SQL with ? placeholders."""
+    if DATABASE_URL:
+        return pq(sql.replace("?", "%s"), params)
+    return sq(sql, params)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # MMSI range 200000000–799999999 = real vessels (filters out buoys/beacons).
     global ALLOWED_MMSIS
+    # MMSI range 200000000–799999999 = real vessels (excludes buoys/beacons)
     sql = "SELECT DISTINCT mmsi FROM ais_202503_static WHERE mmsi BETWEEN 200000000 AND 799999999 ORDER BY mmsi"
     try:
-        rows = nq(sql) if NEON_CONN else sq(sql)
-        ALLOWED_MMSIS = {r["mmsi"] for r in rows}
-        print(f"Loaded {len(ALLOWED_MMSIS)} allowed vessels.")
+        ALLOWED_MMSIS = {r["mmsi"] for r in query(sql)}
+        print(f"Loaded {len(ALLOWED_MMSIS)} vessels ({'postgres' if DATABASE_URL else 'sqlite'}).")
     except Exception as e:
-        print(f"Warning: failed to load ALLOWED_MMSIS ({e}). API will return no vessels.")
+        print(f"Warning: could not load vessels from DB ({e}).")
     yield
 
 
@@ -73,27 +74,23 @@ CORS_ORIGINS = os.environ.get(
     "CORS_ORIGINS",
     "https://vesselviz.vercel.app,http://localhost:3000,http://localhost:5173",
 ).split(",")
-app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"]
+)
 
 
 @app.get("/")
 def root():
-    return {"message": "app is running", "db": "neon" if NEON_CONN else "sqlite"}
+    return {"message": "app is running", "db": "postgres" if DATABASE_URL else "sqlite"}
 
 
 @app.get("/api/vessels")
 def get_vessels():
-    """List every vessel in ALLOWED_MMSIS, one row each."""
-    rows = query(
-        pg_sql="""
-            SELECT DISTINCT ON (mmsi) mmsi, vessel_name, ship_type, 'CCG' AS source
-            FROM ais_202503_static WHERE mmsi IS NOT NULL ORDER BY mmsi
-        """,
-        lite_sql="""
-            SELECT mmsi, vessel_name, ship_type, 'CCG' AS source
-            FROM ais_202503_static WHERE mmsi IS NOT NULL GROUP BY mmsi
-        """,
-    )
+    # MIN() aggregation works in both SQLite and Postgres.
+    rows = query("""
+        SELECT mmsi, MIN(vessel_name) AS vessel_name, MIN(ship_type) AS ship_type, 'CCG' AS source
+        FROM ais_202503_static WHERE mmsi IS NOT NULL GROUP BY mmsi
+    """)
     seen: set[int] = set()
     vessels = []
     for r in rows:
@@ -114,31 +111,21 @@ def get_vessel_route(
     start: str | None = Query(None),
     end: str | None = Query(None),
 ):
-    """Ordered position track for one vessel, optionally filtered by date range."""
     if ALLOWED_MMSIS and mmsi not in ALLOWED_MMSIS:
         raise HTTPException(status_code=404, detail="Vessel not found")
 
-    # CCG dynamic table stores time as unix epoch (integer seconds).
-    pg_sql = "SELECT time, longitude, latitude, sog, cog FROM ais_202503_dynamic WHERE mmsi = $1"
-    lite_sql = "SELECT time, longitude, latitude, sog, cog FROM ais_202503_dynamic WHERE mmsi = ?"
-    pg_params: list = [mmsi]
-    lite_params: list = [mmsi]
+    sql = "SELECT time, longitude, latitude, sog, cog FROM ais_202503_dynamic WHERE mmsi = ?"
+    params: list = [mmsi]
 
+    # Convert ISO strings to epoch ints — same comparison works in both SQLite and Postgres.
     if start:
-        n = len(pg_params) + 1
-        pg_sql += f" AND time >= EXTRACT(EPOCH FROM ${n}::timestamp)::bigint"
-        lite_sql += " AND time >= strftime('%s', ?)"
-        pg_params.append(start)
-        lite_params.append(start)
+        sql += " AND time >= ?"
+        params.append(to_epoch(start))
     if end:
-        n = len(pg_params) + 1
-        pg_sql += f" AND time <= EXTRACT(EPOCH FROM ${n}::timestamp)::bigint"
-        lite_sql += " AND time <= strftime('%s', ?)"
-        pg_params.append(end)
-        lite_params.append(end)
+        sql += " AND time <= ?"
+        params.append(to_epoch(end))
 
-    pg_sql += " ORDER BY time"
-    lite_sql += " ORDER BY time"
+    sql += " ORDER BY time"
 
     points = [
         {
@@ -147,8 +134,7 @@ def get_vessel_route(
             "longitude": r["longitude"],
             "sog": r["sog"],
             "cog": r["cog"],
-            "source": "CCG",
         }
-        for r in query(pg_sql, lite_sql, pg_params, lite_params)
+        for r in query(sql, params)
     ]
     return {"mmsi": mmsi, "points": points, "count": len(points)}

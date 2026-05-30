@@ -1,11 +1,30 @@
 services:
-  backend:
-    build: .
-    volumes:
-      - ./data:/app/data  # mount the DB from host
+  postgres:
+    image: postgres:16-alpine
     environment:
-      - DATABASE_URL=${DATABASE_URL:-}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost}
+      POSTGRES_DB: ais
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"  # exposed so the pipeline can write to it from the host machine
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ais
+      - CORS_ORIGINS=http://localhost
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -15,3 +34,6 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  pgdata:

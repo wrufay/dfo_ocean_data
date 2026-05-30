@@ -21,7 +21,7 @@ The committed `data/ais.db` contains a small cherry-picked sample of vessels (tu
 |---|---|
 | Frontend | React + OpenLayers + Tailwind CSS (Vite) |
 | Backend | FastAPI (Python) |
-| Database | SQLite (demo) / Neon Postgres (optional scale-up) |
+| Database | SQLite |
 | AIS decoding | [aisdb](https://aisviz.cs.dal.ca/) (Dalhousie University) |
 
 ## Running locally
@@ -45,13 +45,36 @@ Open <http://localhost:3000>.
 
 By default Vite proxies `/api` requests to `http://localhost:8000`. To point at a deployed backend, set `VITE_API_URL` in `frontend/.env`.
 
-## Running with Docker
+## Running with Docker (scientist workflow)
 
+For researchers loading their own confidential data. Everything runs locally — data never leaves your machine.
+
+**1. Start the stack:**
 ```bash
-docker-compose up --build
+docker-compose up --build -d
+```
+This starts Postgres, the backend, and the frontend. Open <http://localhost> — it will show no vessels until the pipeline runs.
+
+**2. Install pipeline dependencies:**
+```bash
+source venv/bin/activate
+pip install -r requirements.txt -r pipeline/requirements.txt
 ```
 
-Open <http://localhost>. The frontend container serves the built React app on port 80 and proxies `/api/` to the backend container.
+**3. Point the pipeline at your CCG files** (`pipeline/ingest.py`):
+```python
+CCG_DIR = "/path/to/your/ccg/data"
+DEMO_SAMPLE = None  # keep all vessels
+```
+
+**4. Run the pipeline** (writes to the Postgres container via the exposed port 5432):
+```bash
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ais python pipeline/ingest.py
+```
+
+**5. Reload <http://localhost>** — all your vessels are now visible.
+
+The backend inside Docker connects to Postgres automatically (`DATABASE_URL` is pre-configured in `docker-compose.yml`). The pipeline runs on your host machine and writes to the same Postgres container through the exposed port.
 
 ## Loading your own data
 
@@ -85,17 +108,6 @@ The pipeline (`pipeline/ingest.py`) decodes raw CCG NMEA files into a SQLite dat
    The script wipes any existing `data/ais.db`, decodes the first matching CCG file, trims to the bounding box, samples (if configured), and VACUUMs the result.
 
 5. **Start the app** — the backend reads `data/ais.db` automatically.
-
-## Scaling up to Postgres
-
-For multi-user deployments or datasets too large for SQLite, migrate to Neon (serverless Postgres over HTTPS, works through restrictive firewalls):
-
-```bash
-export NEON_CONNECTION_STRING="postgresql://user:pass@host/db"
-python3 pipeline/migrate_to_neon.py
-```
-
-Set the same `NEON_CONNECTION_STRING` in the backend's environment and `main.py` will route queries to Neon instead of SQLite.
 
 ## API
 
