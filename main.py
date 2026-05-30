@@ -23,7 +23,7 @@ ALLOWED_MMSIS: set[int] = set()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global ALLOWED_MMSIS
-    sql = "SELECT DISTINCT mmsi FROM ais_202503_static WHERE mmsi BETWEEN 200000000 AND 799999999 ORDER BY mmsi LIMIT 20"
+    sql = "SELECT DISTINCT mmsi FROM ais_202503_static WHERE mmsi BETWEEN 200000000 AND 799999999 ORDER BY mmsi"
     try:
         rows = nq(sql) if NEON_CONN else sq(sql)
         ALLOWED_MMSIS = {r["mmsi"] for r in rows}
@@ -33,7 +33,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "https://vesselviz.vercel.app").split(",")
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "https://vesselviz.vercel.app,http://localhost:3000,http://localhost:5173").split(",")
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 

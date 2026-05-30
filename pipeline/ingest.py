@@ -28,7 +28,7 @@ SQLITE_PATH = Path(__file__).parent.parent / "data" / "ais.db"
 
 # Set to an int to keep only N vessels in the output DB (safe to commit).
 # Set to None to keep all data (local practice only — don't commit).
-DEMO_SAMPLE = 10
+DEMO_SAMPLE = 18
 
 # Set DATABASE_URL to use Postgres; if unset, falls back to SQLite
 DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
@@ -105,23 +105,40 @@ def trim_ccg_to_scotian_shelf():
     print("Trim complete.")
 
 
-def sample_to_demo(n: int):
+DEMO_MMSIS: list[int] = [
+    316001997,  # Seaman's Toy I
+    316002800,  # Atlantic Willow
+    316003786,  # Crabs R Us
+    316004937,  # Classy Lady
+    316011549,  # Oblivious One
+    316015722,  # Merrickville
+    316021475,  # Cadillac
+    316021505,  # Arthur's Pride
+    316022916,  # Kelly & Kids
+    316030538,  # Craig Blake
+    316032289,  # Svitzer Montreal
+    316035755,  # Strictly Business
+    316036178,  # Maintainer I
+    316036216,  # Vincent Coleman
+    316038574,  # Atlantic Ash
+    316042836,  # Devil's Advocate
+    316046244,  # HFX Fire Boat 1
+    316054148,  # Foundation Pilot
+]
+
+
+def sample_to_demo():
     """
-    Keep only N distinct CCG vessels so the DB is small and safe to commit.
+    Keep only the hand-picked DEMO_MMSIS so the DB is small and safe to commit.
     Runs automatically after ingestion when DEMO_SAMPLE is set.
     """
-    print(f"\nSampling to {n} CCG vessels for demo DB...")
+    mmsis = DEMO_MMSIS
+    print(f"\nSampling to {len(mmsis)} cherry-picked vessels for demo DB...")
     with sqlite3.connect(str(SQLITE_PATH)) as conn:
-        mmsis = [r[0] for r in conn.execute(
-            "SELECT DISTINCT mmsi FROM ais_202503_dynamic WHERE mmsi BETWEEN 200000000 AND 799999999 ORDER BY mmsi LIMIT ?", (n,)
-        ).fetchall()]
-
-        if mmsis:
-            placeholders = ",".join("?" * len(mmsis))
-            conn.execute(f"DELETE FROM ais_202503_dynamic WHERE mmsi NOT IN ({placeholders})", mmsis)
-            conn.execute(f"DELETE FROM ais_202503_static  WHERE mmsi NOT IN ({placeholders})", mmsis)
-            print(f"  Kept {len(mmsis)} vessels: {mmsis}")
-
+        placeholders = ",".join("?" * len(mmsis))
+        conn.execute(f"DELETE FROM ais_202503_dynamic WHERE mmsi NOT IN ({placeholders})", mmsis)
+        conn.execute(f"DELETE FROM ais_202503_static  WHERE mmsi NOT IN ({placeholders})", mmsis)
+        print(f"  Kept {len(mmsis)} vessels: {mmsis}")
         conn.commit()
 
     with sqlite3.connect(str(SQLITE_PATH)) as conn:
@@ -147,12 +164,15 @@ def query_scotian_shelf(start: datetime, end: datetime):
 if __name__ == "__main__":
     if not USE_POSTGRES:
         SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if SQLITE_PATH.exists():
+            SQLITE_PATH.unlink()
+            print("Removed old ais.db for clean run.")
         print("No DATABASE_URL set — using SQLite at", SQLITE_PATH)
 
     ingest_ccg()
 
     if DEMO_SAMPLE:
-        sample_to_demo(DEMO_SAMPLE)
+        sample_to_demo()
 
     print("\nSample CCG query (first 3 rows):")
     start = datetime(2025, 3, 11)
