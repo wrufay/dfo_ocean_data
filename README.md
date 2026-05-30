@@ -47,16 +47,29 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-## Data Ingestion
+## Loading Your Own Data
 
-Raw CCG data lives on the lab machine at `/home/shared/aisdecode/`. To re-ingest:
+1. **Point the pipeline at your CCG files.** Open `pipeline/ingest.py` and set `CCG_DIR` to the directory containing your `CCG_AIS_UTC_Log_*.csv` files:
+   ```python
+   CCG_DIR = "/path/to/your/ccg/data"
+   ```
 
-```bash
-source venv/bin/activate
-python3 pipeline/ingest.py
-```
+2. **Adjust the bounding box** if you are working outside the Scotian Shelf:
+   ```python
+   XMIN, XMAX = -66.0, -57.0  # longitude
+   YMIN, YMAX = 42.0,  47.0   # latitude
+   ```
 
-Decodes raw NMEA files, filters to the Scotian Shelf bounding box (lat 42–47°N, lon -66–-57°W), and samples down to `DEMO_SAMPLE` vessels for the committed demo DB. Set `DEMO_SAMPLE = None` to keep all data for local analysis (do not commit the full DB).
+3. **Run the pipeline:**
+   ```bash
+   source venv/bin/activate
+   python3 pipeline/ingest.py
+   ```
+   This decodes the raw NMEA files, filters to your bounding box, and writes `data/ais.db`.
+
+4. **Set `DEMO_SAMPLE = None`** in `pipeline/ingest.py` to keep all vessels (default is 10 for the demo). Do not commit a full dataset to git.
+
+5. **Start the app** — the backend reads `data/ais.db` automatically on startup.
 
 ## API
 
