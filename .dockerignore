@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+frontend/
+pipeline/
+node_modules/
+.env
+README.md
+docker-compose.yml
+railway.json
+Procfile

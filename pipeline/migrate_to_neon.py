@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
 Migrate data/ais.db (SQLite) to Neon Postgres via HTTP API.
-Run once after ingestion. Set NEON_CONNECTION_STRING before running.
 
-    export NEON_CONNECTION_STRING="postgresql://..."
+Use this when you outgrow the SQLite demo and want a hosted Postgres for
+multi-user access or larger datasets.
+
+    export NEON_CONNECTION_STRING="postgresql://user:pass@host/db"
     python3 pipeline/migrate_to_neon.py
+
+The backend (main.py) will automatically use Neon when NEON_CONNECTION_STRING
+is set in its environment.
 """
 
 import os
@@ -16,29 +21,26 @@ import httpx
 
 SQLITE_PATH = Path(__file__).parent.parent / "data" / "ais.db"
 
-# Set locally before running: export NEON_CONNECTION_STRING="postgresql://..."
 NEON_CONN = os.environ.get("NEON_CONNECTION_STRING")
 if not NEON_CONN:
     raise SystemExit("Error: NEON_CONNECTION_STRING not set.")
 
-_host_match = re.search(r'@([^/?]+)', NEON_CONN)
+_host_match = re.search(r"@([^/?]+)", NEON_CONN)
 NEON_URL = f"https://{_host_match.group(1)}/sql" if _host_match else ""
 HEADERS = {"Neon-Connection-String": NEON_CONN, "Content-Type": "application/json"}
 
-
-# Rows to insert into Neon Postgres per HTTP request. 1.4M CCG rows = 1,400 requests at this size.
 BATCH_SIZE = 1000
 
 
 def nq(sql: str, params: list | None = None):
     body: dict = {"query": sql}
     if params:
-        body["params"] = [p for p in params]
+        body["params"] = list(params)
     r = httpx.post(NEON_URL, json=body, headers=HEADERS, timeout=60)
     r.raise_for_status()
     return r.json()
 
-# Setup schema in Neon Postgres
+
 def create_tables():
     print("Creating tables...")
     nq("""
@@ -60,47 +62,33 @@ def create_tables():
 
     nq("""
         CREATE TABLE IF NOT EXISTS ais_202503_static (
-            mmsi         BIGINT NOT NULL,
-            time         BIGINT NOT NULL,
-            vessel_name  TEXT,
-            ship_type    INTEGER,
-            call_sign    TEXT,
-            imo          BIGINT NOT NULL DEFAULT 0,
-            dim_bow      INTEGER,
-            dim_stern    INTEGER,
-            dim_port     INTEGER,
-            dim_star     INTEGER,
-            draught      INTEGER,
-            destination  TEXT,
-            ais_version  INTEGER,
+            mmsi          BIGINT NOT NULL,
+            time          BIGINT NOT NULL,
+            vessel_name   TEXT,
+            ship_type     INTEGER,
+            call_sign     TEXT,
+            imo           BIGINT NOT NULL DEFAULT 0,
+            dim_bow       INTEGER,
+            dim_stern     INTEGER,
+            dim_port      INTEGER,
+            dim_star      INTEGER,
+            draught       INTEGER,
+            destination   TEXT,
+            ais_version   INTEGER,
             fixing_device TEXT,
-            eta_month    INTEGER,
-            eta_day      INTEGER,
-            eta_hour     INTEGER,
-            eta_minute   INTEGER,
-            source       TEXT NOT NULL
+            eta_month     INTEGER,
+            eta_day       INTEGER,
+            eta_hour      INTEGER,
+            eta_minute    INTEGER,
+            source        TEXT NOT NULL
         )
     """)
     nq("CREATE INDEX IF NOT EXISTS idx_static_mmsi ON ais_202503_static (mmsi)")
-
-    nq("""
-        CREATE TABLE IF NOT EXISTS ais_satellite (
-            mmsi        BIGINT,
-            time        TEXT,
-            longitude   DOUBLE PRECISION,
-            latitude    DOUBLE PRECISION,
-            sog         DOUBLE PRECISION,
-            cog         DOUBLE PRECISION,
-            vessel_name TEXT,
-            ship_type   TEXT
-        )
-    """)
-    nq("CREATE INDEX IF NOT EXISTS idx_sat_mmsi_time ON ais_satellite (mmsi, time)")
     print("Tables ready.")
 
 
 def migrate_table(conn: sqlite3.Connection, table: str, columns: list[str]):
-    """Read all rows from a SQLite table and insert them into Neon Postgres in batches."""
+    """Stream rows from SQLite to Neon in batches."""
     total = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     print(f"\n{table}: {total:,} rows")
 
@@ -144,9 +132,6 @@ if __name__ == "__main__":
         "mmsi", "time", "vessel_name", "ship_type", "call_sign", "imo",
         "dim_bow", "dim_stern", "dim_port", "dim_star", "draught", "destination",
         "ais_version", "fixing_device", "eta_month", "eta_day", "eta_hour", "eta_minute", "source",
-    ])
-    migrate_table(conn, "ais_satellite", [
-        "mmsi", "time", "longitude", "latitude", "sog", "cog", "vessel_name", "ship_type",
     ])
 
     conn.close()

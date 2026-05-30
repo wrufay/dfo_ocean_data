@@ -1,0 +1,4 @@
+# Additional packages needed only when running pipeline/ingest.py.
+# Install on top of the root requirements:
+#     pip install -r requirements.txt -r pipeline/requirements.txt
+aisdb

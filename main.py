@@ -1,3 +1,13 @@
+"""
+Scotian Shelf AIS Vessel Tracker — FastAPI backend.
+
+Reads from SQLite (data/ais.db) by default. If NEON_CONNECTION_STRING is set,
+queries Neon Postgres over HTTPS instead.
+
+Run locally:
+    uvicorn main:app --reload
+"""
+
 import os
 import re
 import sqlite3
@@ -8,37 +18,19 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-# uvicorn main:app --reload
-# Set NEON_CONNECTION_STRING env var to use Neon Postgres, otherwise falls back to SQLite.
-
 DB_PATH = Path(__file__).parent / "data" / "ais.db"
+
 NEON_CONN: str = os.environ.get("NEON_CONNECTION_STRING", "")
-_neon_host_match = re.search(r'@([^/?]+)', NEON_CONN)
+_neon_host_match = re.search(r"@([^/?]+)", NEON_CONN)
 NEON_URL = f"https://{_neon_host_match.group(1)}/sql" if _neon_host_match else ""
 
-# Public demo: restrict to 20 vessels so we're not publishing the full dataset
+# Whitelist of vessel MMSIs the API will serve. Populated at startup from the DB
+# so we only expose the (sampled) vessels actually shipped in the demo DB.
 ALLOWED_MMSIS: set[int] = set()
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    global ALLOWED_MMSIS
-    sql = "SELECT DISTINCT mmsi FROM ais_202503_static WHERE mmsi BETWEEN 200000000 AND 799999999 ORDER BY mmsi"
-    try:
-        rows = nq(sql) if NEON_CONN else sq(sql)
-        ALLOWED_MMSIS = {r["mmsi"] for r in rows}
-    except Exception:
-        pass
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
-CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "https://vesselviz.vercel.app,http://localhost:3000,http://localhost:5173").split(",")
-app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
-
-
 def nq(sql: str, params: list | None = None) -> list[dict]:
-    """Execute SQL via Neon HTTP API."""
+    """Execute SQL via the Neon HTTP API."""
     body: dict = {"query": sql}
     if params:
         body["params"] = params
@@ -57,7 +49,31 @@ def sq(sql: str, params: list | None = None) -> list[dict]:
 
 
 def query(pg_sql: str, lite_sql: str, pg_params: list | None = None, lite_params: list | None = None) -> list[dict]:
+    """Run the Postgres query if Neon is configured, otherwise the SQLite query."""
     return nq(pg_sql, pg_params) if NEON_CONN else sq(lite_sql, lite_params)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # MMSI range 200000000–799999999 = real vessels (filters out buoys/beacons).
+    global ALLOWED_MMSIS
+    sql = "SELECT DISTINCT mmsi FROM ais_202503_static WHERE mmsi BETWEEN 200000000 AND 799999999 ORDER BY mmsi"
+    try:
+        rows = nq(sql) if NEON_CONN else sq(sql)
+        ALLOWED_MMSIS = {r["mmsi"] for r in rows}
+        print(f"Loaded {len(ALLOWED_MMSIS)} allowed vessels.")
+    except Exception as e:
+        print(f"Warning: failed to load ALLOWED_MMSIS ({e}). API will return no vessels.")
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+CORS_ORIGINS = os.environ.get(
+    "CORS_ORIGINS",
+    "https://vesselviz.vercel.app,http://localhost:3000,http://localhost:5173",
+).split(",")
+app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/")
@@ -67,7 +83,8 @@ def root():
 
 @app.get("/api/vessels")
 def get_vessels():
-    ccg = query(
+    """List every vessel in ALLOWED_MMSIS, one row each."""
+    rows = query(
         pg_sql="""
             SELECT DISTINCT ON (mmsi) mmsi, vessel_name, ship_type, 'CCG' AS source
             FROM ais_202503_static WHERE mmsi IS NOT NULL ORDER BY mmsi
@@ -77,44 +94,17 @@ def get_vessels():
             FROM ais_202503_static WHERE mmsi IS NOT NULL GROUP BY mmsi
         """,
     )
-    vessels = [
-        {"mmsi": r["mmsi"], "vessel_name": r["vessel_name"], "ship_type": r["ship_type"], "source": r["source"]}
-        for r in ccg if r["mmsi"] in ALLOWED_MMSIS
-    ]
-    return {"vessels": vessels, "count": len(vessels)}
-
-
-@app.get("/api/vessels/area")
-def get_vessels_in_area(
-    min_lat: float = Query(...),
-    max_lat: float = Query(...),
-    min_lon: float = Query(...),
-    max_lon: float = Query(...),
-):
-    ccg = query(
-        pg_sql="""
-            SELECT s.mmsi, s.vessel_name, s.ship_type, 'CCG' AS source
-            FROM ais_202503_static s
-            WHERE s.mmsi IN (
-                SELECT DISTINCT mmsi FROM ais_202503_dynamic
-                WHERE latitude BETWEEN $1 AND $2 AND longitude BETWEEN $3 AND $4
-            )
-        """,
-        lite_sql="""
-            SELECT s.mmsi, s.vessel_name, s.ship_type, 'CCG' AS source
-            FROM ais_202503_static s
-            WHERE s.mmsi IN (
-                SELECT DISTINCT mmsi FROM ais_202503_dynamic
-                WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-            )
-        """,
-        pg_params=[min_lat, max_lat, min_lon, max_lon],
-        lite_params=[min_lat, max_lat, min_lon, max_lon],
-    )
-    vessels = [
-        {"mmsi": r["mmsi"], "vessel_name": r["vessel_name"], "ship_type": r["ship_type"], "source": r["source"]}
-        for r in ccg if r["mmsi"] in ALLOWED_MMSIS
-    ]
+    seen: set[int] = set()
+    vessels = []
+    for r in rows:
+        if r["mmsi"] in ALLOWED_MMSIS and r["mmsi"] not in seen:
+            seen.add(r["mmsi"])
+            vessels.append({
+                "mmsi": r["mmsi"],
+                "vessel_name": r["vessel_name"],
+                "ship_type": r["ship_type"],
+                "source": r["source"],
+            })
     return {"vessels": vessels, "count": len(vessels)}
 
 
@@ -122,39 +112,43 @@ def get_vessels_in_area(
 def get_vessel_route(
     mmsi: int,
     start: str | None = Query(None),
-    end:   str | None = Query(None),
+    end: str | None = Query(None),
 ):
+    """Ordered position track for one vessel, optionally filtered by date range."""
     if ALLOWED_MMSIS and mmsi not in ALLOWED_MMSIS:
         raise HTTPException(status_code=404, detail="Vessel not found")
-    points = []
 
-    # --- CCG (time stored as unix epoch integer) ---
-    pg_sql   = "SELECT time, longitude, latitude, sog, cog FROM ais_202503_dynamic WHERE mmsi = $1"
+    # CCG dynamic table stores time as unix epoch (integer seconds).
+    pg_sql = "SELECT time, longitude, latitude, sog, cog FROM ais_202503_dynamic WHERE mmsi = $1"
     lite_sql = "SELECT time, longitude, latitude, sog, cog FROM ais_202503_dynamic WHERE mmsi = ?"
     pg_params: list = [mmsi]
     lite_params: list = [mmsi]
 
     if start:
         n = len(pg_params) + 1
-        pg_sql   += f" AND time >= EXTRACT(EPOCH FROM ${n}::timestamp)::bigint"
+        pg_sql += f" AND time >= EXTRACT(EPOCH FROM ${n}::timestamp)::bigint"
         lite_sql += " AND time >= strftime('%s', ?)"
-        pg_params.append(start); lite_params.append(start)
+        pg_params.append(start)
+        lite_params.append(start)
     if end:
         n = len(pg_params) + 1
-        pg_sql   += f" AND time <= EXTRACT(EPOCH FROM ${n}::timestamp)::bigint"
+        pg_sql += f" AND time <= EXTRACT(EPOCH FROM ${n}::timestamp)::bigint"
         lite_sql += " AND time <= strftime('%s', ?)"
-        pg_params.append(end); lite_params.append(end)
+        pg_params.append(end)
+        lite_params.append(end)
 
     pg_sql += " ORDER BY time"
     lite_sql += " ORDER BY time"
 
-    try:
-        for r in query(pg_sql, lite_sql, pg_params, lite_params):
-            points.append({"time": r["time"], "latitude": r["latitude"],
-                           "longitude": r["longitude"], "sog": r["sog"],
-                           "cog": r["cog"], "source": "CCG"})
-    except Exception:
-        pass
-
-    points.sort(key=lambda p: p["time"])
+    points = [
+        {
+            "time": r["time"],
+            "latitude": r["latitude"],
+            "longitude": r["longitude"],
+            "sog": r["sog"],
+            "cog": r["cog"],
+            "source": "CCG",
+        }
+        for r in query(pg_sql, lite_sql, pg_params, lite_params)
+    ]
     return {"mmsi": mmsi, "points": points, "count": len(points)}

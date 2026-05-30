@@ -3,14 +3,13 @@ import Map from 'ol/Map';
 import View from 'ol/View';
 import TileLayer from 'ol/layer/Tile';
 import OSM from 'ol/source/OSM';
-import { fromLonLat, transformExtent } from 'ol/proj';
+import { fromLonLat } from 'ol/proj';
 import Feature, { type FeatureLike } from 'ol/Feature';
 import LineString from 'ol/geom/LineString';
 import Point from 'ol/geom/Point';
 import VectorLayer from 'ol/layer/Vector';
 import VectorSource from 'ol/source/Vector';
 import { Style, Stroke, Circle as CircleStyle, Fill } from 'ol/style';
-import Draw, { createBox } from 'ol/interaction/Draw';
 import 'ol/ol.css';
 
 const API = import.meta.env.VITE_API_URL ?? '';
@@ -23,7 +22,7 @@ interface Vessel {
 }
 
 interface RoutePoint {
-  time: number | string;
+  time: number;
   latitude: number;
   longitude: number;
   sog: number | null;
@@ -31,17 +30,8 @@ interface RoutePoint {
   source: string;
 }
 
-function formatTime(t: number | string): string {
-  const s = String(t);
-  // unix epoch (CCG)
-  if (/^\d+$/.test(s)) {
-    const d = new Date(Number(s) * 1000);
-    return d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-  }
-  // compact ISO e.g. 20251201T035835Z
-  if (s.length >= 15)
-    return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)} ${s.slice(9,11)}:${s.slice(11,13)}:${s.slice(13,15)} UTC`;
-  return s;
+function formatTime(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
 }
 
 function featureStyle(feature: FeatureLike): Style {
@@ -65,11 +55,10 @@ function ShipMap() {
   const mapRef    = useRef<HTMLDivElement>(null);
   const mapObj    = useRef<Map | null>(null);
   const sourceRef = useRef(new VectorSource());
-  const drawRef   = useRef<Draw | null>(null);
 
   interface Popup {
     x: number; y: number;
-    time: number | string; lat: number; lon: number;
+    time: number; lat: number; lon: number;
     sog: number | null; cog: number | null; source: string;
   }
 
@@ -81,7 +70,6 @@ function ShipMap() {
   const [end, setEnd]               = useState('2025-03-13');
   const [loading, setLoading]       = useState(false);
   const [pointCount, setPointCount] = useState<number | null>(null);
-  const [drawMode, setDrawMode]     = useState(false);
   const [popup, setPopup]           = useState<Popup | null>(null);
 
   useEffect(() => {
@@ -128,44 +116,6 @@ function ShipMap() {
       .catch(console.error);
   }, []);
 
-  useEffect(() => {
-    const map = mapObj.current;
-    if (!map) return;
-
-    if (drawRef.current) {
-      map.removeInteraction(drawRef.current);
-      drawRef.current = null;
-    }
-
-    if (drawMode) {
-      const draw = new Draw({
-        source: new VectorSource(),
-        type: 'Circle',
-        geometryFunction: createBox(),
-      });
-
-      draw.on('drawend', e => {
-        const extent = e.feature.getGeometry()!.getExtent();
-        const [min_lon, min_lat, max_lon, max_lat] = transformExtent(extent, 'EPSG:3857', 'EPSG:4326');
-        setDrawMode(false);
-
-        const params = new URLSearchParams({
-          min_lat: String(min_lat),
-          max_lat: String(max_lat),
-          min_lon: String(min_lon),
-          max_lon: String(max_lon),
-        });
-        setVessels([]);
-        fetch(`${API}/api/vessels/area?${params}`)
-          .then(r => r.json())
-          .then(d => setVessels(d.vessels || []))
-          .catch(console.error);
-      });
-
-      map.addInteraction(draw);
-      drawRef.current = draw;
-    }
-  }, [drawMode]);
 
   function loadRoute() {
     if (!selected) return;
@@ -250,12 +200,6 @@ function ShipMap() {
 
           <div className="flex gap-2 mb-3">
             <button
-              onClick={() => setDrawMode(m => !m)}
-              className={`flex-1 rounded py-1.5 text-sm border ${drawMode ? 'bg-[#127475] text-white' : 'text-[#127475] border-[#127475]'}`}
-            >
-              {drawMode ? 'Drawing...' : 'Filter by Area'}
-            </button>
-            <button
               onClick={resetVessels}
               className="flex-1 rounded py-1.5 text-sm border text-gray-500 border-gray-300"
             >
@@ -312,7 +256,7 @@ function ShipMap() {
         </div>
       </div>
 
-      <div ref={mapRef} className={`w-full h-full pl-72 ${drawMode ? 'cursor-crosshair' : ''}`} />
+      <div ref={mapRef} className="w-full h-full pl-72" />
 
       <div className="absolute bottom-4 right-4 bg-white rounded shadow px-3 py-2 text-xs z-10">
         <div className="font-medium mb-1 text-gray-600">Speed (knots)</div>
@@ -320,12 +264,6 @@ function ShipMap() {
         <div className="flex items-center gap-1.5 mb-0.5"><span className="w-3 h-3 rounded-full bg-[#f4a261] inline-block"/>3 – 10</div>
         <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#e63946] inline-block"/>&gt; 10</div>
       </div>
-
-      {drawMode && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-[#127475] text-white text-sm px-4 py-2 rounded shadow z-20">
-          Draw a box on the map to filter vessels
-        </div>
-      )}
 
       {showIntro && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -339,9 +277,8 @@ function ShipMap() {
             </p>
             <div className="text-sm text-gray-600 space-y-2 mb-5">
               <div className="flex gap-2"><span className="text-[#127475] font-medium">1.</span><span>Search or browse vessels by name, MMSI, or ship type</span></div>
-              <div className="flex gap-2"><span className="text-[#127475] font-medium">2.</span><span>Use <strong>Filter by Area</strong> to draw a bounding box and isolate vessels in a study region</span></div>
-              <div className="flex gap-2"><span className="text-[#127475] font-medium">3.</span><span>Select a vessel, set a date range, and click <strong>Show Route</strong> to plot its track</span></div>
-              <div className="flex gap-2"><span className="text-[#127475] font-medium">4.</span><span>Click any point on the track to see timestamp, position, speed, and course</span></div>
+              <div className="flex gap-2"><span className="text-[#127475] font-medium">2.</span><span>Select a vessel, set a date range, and click <strong>Show Route</strong> to plot its track</span></div>
+              <div className="flex gap-2"><span className="text-[#127475] font-medium">3.</span><span>Click any point on the track to see timestamp, position, speed, and course</span></div>
             </div>
             <button
               onClick={() => setShowIntro(false)}
