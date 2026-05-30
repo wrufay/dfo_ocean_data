@@ -113,7 +113,7 @@ def sample_to_demo(n: int):
     print(f"\nSampling to {n} CCG vessels for demo DB...")
     with sqlite3.connect(str(SQLITE_PATH)) as conn:
         mmsis = [r[0] for r in conn.execute(
-            "SELECT DISTINCT mmsi FROM ais_202503_dynamic WHERE mmsi > 100000000 ORDER BY mmsi LIMIT ?", (n,)
+            "SELECT DISTINCT mmsi FROM ais_202503_dynamic WHERE mmsi BETWEEN 200000000 AND 799999999 ORDER BY mmsi LIMIT ?", (n,)
         ).fetchall()]
 
         if mmsis:
