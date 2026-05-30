@@ -13,7 +13,7 @@ import { Style, Stroke, Circle as CircleStyle, Fill } from 'ol/style';
 import Draw, { createBox } from 'ol/interaction/Draw';
 import 'ol/ol.css';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API = import.meta.env.VITE_API_URL ?? '';
 
 interface Vessel {
   mmsi: number;
@@ -330,18 +330,18 @@ function ShipMap() {
       {showIntro && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="bg-white rounded-xl shadow-2xl max-w-md w-full mx-4 p-6">
-            <h1 className="text-xl font-semibold text-[#127475] mb-1">Scotian Shelf Vessel Tracker</h1>
-            <p className="text-xs text-gray-400 mb-4">DFO · Bedford Institute of Oceanography</p>
+            <h1 className="text-xl font-semibold text-[#127475] mb-1">Scotian Shelf AIS Vessel Tracker</h1>
+            <p className="text-xs text-gray-400 mb-4">Canadian Coast Guard · AIS Terrestrial Data</p>
             <p className="text-sm text-gray-600 mb-4">
-              This tool visualizes AIS vessel traffic on the Scotian Shelf using data from Canadian Coast Guard
-              shore stations and exactEarth satellites. It enables researchers to explore vessel movement
-              patterns, routes, and speeds across the region.
+              Visualize vessel traffic on the Scotian Shelf from Canadian Coast Guard shore station AIS data.
+              Explore movement patterns, transit routes, and speeds — useful for correlating vessel activity
+              with underwater noise levels, marine mammal sightings, or other oceanographic observations.
             </p>
             <div className="text-sm text-gray-600 space-y-2 mb-5">
-              <div className="flex gap-2"><span className="text-[#127475] font-medium">1.</span><span>Search or browse vessels in the sidebar</span></div>
-              <div className="flex gap-2"><span className="text-[#127475] font-medium">2.</span><span>Use <strong>Filter by Area</strong> to draw a box and narrow down vessels in a region</span></div>
-              <div className="flex gap-2"><span className="text-[#127475] font-medium">3.</span><span>Select a vessel, pick a date range, and click <strong>Show Route</strong></span></div>
-              <div className="flex gap-2"><span className="text-[#127475] font-medium">4.</span><span>Click any position point on the map to see time, speed, and coordinates</span></div>
+              <div className="flex gap-2"><span className="text-[#127475] font-medium">1.</span><span>Search or browse vessels by name, MMSI, or ship type</span></div>
+              <div className="flex gap-2"><span className="text-[#127475] font-medium">2.</span><span>Use <strong>Filter by Area</strong> to draw a bounding box and isolate vessels in a study region</span></div>
+              <div className="flex gap-2"><span className="text-[#127475] font-medium">3.</span><span>Select a vessel, set a date range, and click <strong>Show Route</strong> to plot its track</span></div>
+              <div className="flex gap-2"><span className="text-[#127475] font-medium">4.</span><span>Click any point on the track to see timestamp, position, speed, and course</span></div>
             </div>
             <button
               onClick={() => setShowIntro(false)}
@@ -360,11 +360,11 @@ function ShipMap() {
         >
           <div className="font-semibold text-[#127475] mb-1">{popup.source}</div>
           <div className="text-gray-600 space-y-0.5">
-            <div><span className="text-gray-400">Time </span>{formatTime(popup.time)}</div>
-            <div><span className="text-gray-400">Lat  </span>{popup.lat?.toFixed(4)}</div>
-            <div><span className="text-gray-400">Lon  </span>{popup.lon?.toFixed(4)}</div>
-            <div><span className="text-gray-400">SOG  </span>{popup.sog != null ? `${popup.sog} kt` : '—'}</div>
-            <div><span className="text-gray-400">COG  </span>{popup.cog != null ? `${popup.cog}°` : '—'}</div>
+            <div><span className="text-gray-400">Time     </span>{formatTime(popup.time)}</div>
+            <div><span className="text-gray-400">Latitude </span>{popup.lat?.toFixed(5)}°N</div>
+            <div><span className="text-gray-400">Longitude</span>{popup.lon?.toFixed(5)}°</div>
+            <div><span className="text-gray-400">Speed    </span>{popup.sog != null ? `${popup.sog} kt` : '—'}</div>
+            <div><span className="text-gray-400">Course   </span>{popup.cog != null ? `${popup.cog}°` : '—'}</div>
           </div>
         </div>
       )}

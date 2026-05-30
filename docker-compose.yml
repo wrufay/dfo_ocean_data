@@ -1,0 +1,17 @@
+services:
+  backend:
+    build: .
+    volumes:
+      - ./data:/app/data  # mount the DB from host
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost}
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

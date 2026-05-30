@@ -33,7 +33,8 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["https://vesselviz.vercel.app"], allow_methods=["*"], allow_headers=["*"])
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "https://vesselviz.vercel.app").split(",")
+app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 
 def nq(sql: str, params: list | None = None) -> list[dict]:

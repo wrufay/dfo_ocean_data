@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/api': 'https://ocean-viz.up.railway.app',
+      '/api': process.env.VITE_API_URL || 'http://localhost:8000',
     },
   },
 });

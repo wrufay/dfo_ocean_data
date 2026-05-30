@@ -5,4 +5,4 @@ __pycache__/
 .env
 frontend/.env
 dist/
-data/*.db
+# data/ais.db is safe to commit after pipeline samples down to DEMO_SAMPLE vessels
